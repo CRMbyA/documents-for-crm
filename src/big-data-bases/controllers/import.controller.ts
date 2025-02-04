@@ -16,11 +16,11 @@ import {
     ParseIntPipe
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { 
-    ApiTags, 
-    ApiOperation, 
-    ApiResponse, 
-    ApiConsumes, 
+import {
+    ApiTags,
+    ApiOperation,
+    ApiResponse,
+    ApiConsumes,
     ApiBody,
     ApiBadRequestResponse,
     ApiNotFoundResponse
@@ -43,10 +43,10 @@ export class ImportController {
     constructor(
         private readonly databaseService: DatabaseService,
         private readonly importService: ImportService,
-    ) {}
+    ) { }
 
     @Post('database')
-    @ApiOperation({ 
+    @ApiOperation({
         summary: 'Create new database',
         description: 'Creates a new database for subsequent client data import'
     })
@@ -65,7 +65,7 @@ export class ImportController {
     }
 
     @Get('databases')
-    @ApiOperation({ 
+    @ApiOperation({
         summary: 'Get all databases',
         description: 'Returns a list of all databases with their record counts'
     })
@@ -79,7 +79,7 @@ export class ImportController {
     }
 
     @Get('databases/:id')
-    @ApiOperation({ 
+    @ApiOperation({
         summary: 'Get database details',
         description: 'Returns details of a specific database'
     })
@@ -98,7 +98,7 @@ export class ImportController {
     }
 
     @Get('databases/:id/stats')
-    @ApiOperation({ 
+    @ApiOperation({
         summary: 'Get database statistics',
         description: 'Returns detailed statistics for a specific database'
     })
@@ -117,7 +117,7 @@ export class ImportController {
     }
 
     @Post('upload')
-    @ApiOperation({ 
+    @ApiOperation({
         summary: 'Upload client data file',
         description: 'Uploads and processes a file containing client data (up to 10GB). Supports CSV and TXT formats.'
     })
@@ -155,12 +155,12 @@ export class ImportController {
                 if (!file.originalname.match(/\.(txt|csv)$/)) {
                     return cb(new BadRequestException('Only .txt and csv files are allowed'), false);
                 }
-                
+
                 const allowedMimeTypes = ['text/plain', 'text/csv', 'application/csv', 'application/vnd.ms-excel'];
                 if (!allowedMimeTypes.includes(file.mimetype)) {
                     return cb(new BadRequestException('Invalid file type'), false);
                 }
-                
+
                 cb(null, true);
             }
         })
@@ -178,63 +178,117 @@ export class ImportController {
     ): Promise<ImportResultDto> {
         return this.importService.continueImportFromLine(file, uploadFileDto.databaseId, 1);
     }
-    
+
     @Post(':databaseId/continue')
-@ApiOperation({ 
-    summary: 'Continue importing from specific line',
-    description: 'Continues importing data from a specific line number in the file'
-})
-@ApiConsumes('multipart/form-data')
-@ApiBody({
-    schema: {
-        type: 'object',
-        required: ['file'],
-        properties: {
-            file: {
-                type: 'string',
-                format: 'binary',
-                description: 'Client data file (CSV or TXT). Maximum size: 10GB'
+    @ApiOperation({
+        summary: 'Continue importing from specific line',
+        description: 'Continues importing data from a specific line number in the file'
+    })
+    @ApiConsumes('multipart/form-data')
+    @ApiBody({
+        schema: {
+            type: 'object',
+            required: ['file'],
+            properties: {
+                file: {
+                    type: 'string',
+                    format: 'binary',
+                    description: 'Client data file (CSV or TXT). Maximum size: 10GB'
+                }
             }
-        }
-    }
-})
-@ApiResponse({
-    status: 200,
-    description: 'Import continuation processed successfully',
-    type: ContinueImportResultDto
-})
-@UseInterceptors(
-    FileInterceptor('file', {
-        storage: memoryStorage(),
-        limits: {
-            fileSize: MAX_FILE_SIZE
-        },
-        fileFilter: (req, file, cb) => {
-            if (!file.originalname.match(/\.(txt|csv)$/)) {
-                return cb(new BadRequestException('Only .txt and csv files are allowed'), false);
-            }
-            
-            const allowedMimeTypes = ['text/plain', 'text/csv', 'application/csv', 'application/vnd.ms-excel'];
-            if (!allowedMimeTypes.includes(file.mimetype)) {
-                return cb(new BadRequestException('Invalid file type'), false);
-            }
-            
-            cb(null, true);
         }
     })
-)
-async continueImport(
-    @UploadedFile(
-        new ParseFilePipe({
-            validators: [
-                new MaxFileSizeValidator({ maxSize: MAX_FILE_SIZE })
-            ],
-        }),
+    @ApiResponse({
+        status: 200,
+        description: 'Import continuation processed successfully',
+        type: ContinueImportResultDto
+    })
+    @UseInterceptors(
+        FileInterceptor('file', {
+            storage: memoryStorage(),
+            limits: {
+                fileSize: MAX_FILE_SIZE
+            },
+            fileFilter: (req, file, cb) => {
+                if (!file.originalname.match(/\.(txt|csv)$/)) {
+                    return cb(new BadRequestException('Only .txt and csv files are allowed'), false);
+                }
+
+                const allowedMimeTypes = ['text/plain', 'text/csv', 'application/csv', 'application/vnd.ms-excel'];
+                if (!allowedMimeTypes.includes(file.mimetype)) {
+                    return cb(new BadRequestException('Invalid file type'), false);
+                }
+
+                cb(null, true);
+            }
+        })
     )
-    file: Express.Multer.File,
-    @Param('databaseId') databaseId: string,
-    @Query('startFromLine', ParseIntPipe) startFromLine: number
-): Promise<ContinueImportResultDto> {
-    return this.importService.continueImportFromLine(file, databaseId, startFromLine);
-}
+    async continueImport(
+        @UploadedFile(
+            new ParseFilePipe({
+                validators: [
+                    new MaxFileSizeValidator({ maxSize: MAX_FILE_SIZE })
+                ],
+            }),
+        )
+        file: Express.Multer.File,
+        @Param('databaseId') databaseId: string,
+        @Query('startFromLine', ParseIntPipe) startFromLine: number
+    ): Promise<ContinueImportResultDto> {
+        return this.importService.continueImportFromLine(file, databaseId, startFromLine);
+    }
+
+    @Get('search-by-phone')
+    @ApiOperation({
+        summary: 'Search client by phone',
+        description: 'Search for a random client by phone number across all databases'
+    })
+    @ApiResponse({
+        status: 200,
+        description: 'Random client found by phone number',
+        schema: {
+            type: 'object',
+            properties: {
+                id: {
+                    type: 'string',
+                    format: 'uuid',
+                    description: 'Client ID'
+                },
+                full_name: {
+                    type: 'string',
+                    description: 'Client full name'
+                },
+                phone: {
+                    type: 'string',
+                    description: 'Client phone number'
+                },
+                email: {
+                    type: 'string',
+                    description: 'Client email'
+                },
+                database_name: {
+                    type: 'string',
+                    description: 'Database name'
+                },
+                database_id: {
+                    type: 'string',
+                    format: 'uuid',
+                    description: 'Database ID'
+                }
+            }
+        }
+    })
+    async searchByPhone(
+        @Query('phone') phone: string
+    ): Promise<{
+        id: string;
+        full_name: string;
+        phone: string;
+        email: string;
+        database_name: string;
+        database_id: string;
+    } | null> {
+        const results = await this.databaseService.findClientsByPhone(phone);
+        return results[0] || null;
+    }
 }
