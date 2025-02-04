@@ -2,11 +2,10 @@ import { Module } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
-
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { JwtModule } from '@nestjs/jwt';
 import { PassportModule } from '@nestjs/passport';
-
+import { BigDataBasesModule } from './big-data-bases/big-data-bases.module';
 
 @Module({
   imports: [
@@ -26,8 +25,7 @@ import { PassportModule } from '@nestjs/passport';
         logging: true
       }),
     }),
-
-    
+    BigDataBasesModule
   ],
   controllers: [AppController],
   providers: [AppService],
