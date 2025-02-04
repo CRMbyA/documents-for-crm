@@ -107,7 +107,7 @@ export class DatabaseService {
         database_name: string;
         database_id: string;
     }>> {
-        // Очищаем номер телефона от всех символов кроме цифр
+        // пїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅ пїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅ
         const cleanPhone = phone.replace(/\D/g, '');
         
         const query = `
@@ -128,7 +128,7 @@ export class DatabaseService {
             LIMIT 1
         `;
 
-        // Добавляем wildcards для частичного совпадения
+        // пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ wildcards пїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ пїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅпїЅ
         const searchPattern = `%${cleanPhone}%`;
         const results = await this.dataSource.query(query, [searchPattern]);
 

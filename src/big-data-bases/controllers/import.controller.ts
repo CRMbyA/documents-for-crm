@@ -12,7 +12,8 @@ import {
     Delete,
     HttpCode,
     HttpStatus,
-    Query
+    Query,
+    ParseIntPipe
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { 
@@ -32,6 +33,7 @@ import { UploadFileDto } from '../dto/upload-file.dto';
 import { DatabaseResponseDto } from '../dto/database.response.dto';
 import { ImportResultDto } from '../dto/import-result.dto';
 import { DatabaseStatsDto } from '../dto/database-stats.dto';
+import { ContinueImportResultDto } from '../dto/continue-import-result.dto';
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024 * 1024; // 10GB
 
@@ -150,12 +152,10 @@ export class ImportController {
                 fileSize: MAX_FILE_SIZE
             },
             fileFilter: (req, file, cb) => {
-                // Validate file extension
                 if (!file.originalname.match(/\.(txt|csv)$/)) {
                     return cb(new BadRequestException('Only .txt and csv files are allowed'), false);
                 }
                 
-                // Validate MIME type
                 const allowedMimeTypes = ['text/plain', 'text/csv', 'application/csv', 'application/vnd.ms-excel'];
                 if (!allowedMimeTypes.includes(file.mimetype)) {
                     return cb(new BadRequestException('Invalid file type'), false);
@@ -176,77 +176,65 @@ export class ImportController {
         file: Express.Multer.File,
         @Body() uploadFileDto: UploadFileDto
     ): Promise<ImportResultDto> {
-        return this.importService.importFile(file, uploadFileDto.databaseId);
+        return this.importService.continueImportFromLine(file, uploadFileDto.databaseId, 1);
     }
-
-    @Delete('databases/:id')
-    @ApiOperation({ 
-        summary: 'Delete database',
-        description: 'Deletes database and all its clients'
-    })
-    @ApiResponse({
-        status: 200,
-        description: 'Database has been successfully deleted'
-    })
-    @ApiNotFoundResponse({
-        description: 'Database not found'
-    })
-    @HttpCode(HttpStatus.OK)
-    async removeDatabase(@Param('id') id: string): Promise<void> {
-        await this.databaseService.remove(id);
-    }
-
-    @Get('search-by-phone')
+    
+    @Post(':databaseId/continue')
 @ApiOperation({ 
-    summary: 'Search client by phone',
-    description: 'Search for a random client by phone number across all databases'
+    summary: 'Continue importing from specific line',
+    description: 'Continues importing data from a specific line number in the file'
 })
-@ApiResponse({
-    status: 200,
-    description: 'Random client found by phone number',
+@ApiConsumes('multipart/form-data')
+@ApiBody({
     schema: {
         type: 'object',
+        required: ['file'],
         properties: {
-            id: {
+            file: {
                 type: 'string',
-                format: 'uuid',
-                description: 'Client ID'
-            },
-            full_name: {
-                type: 'string',
-                description: 'Client full name'
-            },
-            phone: {
-                type: 'string',
-                description: 'Client phone number'
-            },
-            email: {
-                type: 'string',
-                description: 'Client email'
-            },
-            database_name: {
-                type: 'string',
-                description: 'Database name'
-            },
-            database_id: {
-                type: 'string',
-                format: 'uuid',
-                description: 'Database ID'
+                format: 'binary',
+                description: 'Client data file (CSV or TXT). Maximum size: 10GB'
             }
         }
     }
 })
-async searchByPhone(
-    @Query('phone') phone: string
-): Promise<{
-    id: string;
-    full_name: string;
-    phone: string;
-    email: string;
-    database_name: string;
-    database_id: string;
-} | null> {
-    const results = await this.databaseService.findClientsByPhone(phone);
-    return results[0] || null;
+@ApiResponse({
+    status: 200,
+    description: 'Import continuation processed successfully',
+    type: ContinueImportResultDto
+})
+@UseInterceptors(
+    FileInterceptor('file', {
+        storage: memoryStorage(),
+        limits: {
+            fileSize: MAX_FILE_SIZE
+        },
+        fileFilter: (req, file, cb) => {
+            if (!file.originalname.match(/\.(txt|csv)$/)) {
+                return cb(new BadRequestException('Only .txt and csv files are allowed'), false);
+            }
+            
+            const allowedMimeTypes = ['text/plain', 'text/csv', 'application/csv', 'application/vnd.ms-excel'];
+            if (!allowedMimeTypes.includes(file.mimetype)) {
+                return cb(new BadRequestException('Invalid file type'), false);
+            }
+            
+            cb(null, true);
+        }
+    })
+)
+async continueImport(
+    @UploadedFile(
+        new ParseFilePipe({
+            validators: [
+                new MaxFileSizeValidator({ maxSize: MAX_FILE_SIZE })
+            ],
+        }),
+    )
+    file: Express.Multer.File,
+    @Param('databaseId') databaseId: string,
+    @Query('startFromLine', ParseIntPipe) startFromLine: number
+): Promise<ContinueImportResultDto> {
+    return this.importService.continueImportFromLine(file, databaseId, startFromLine);
 }
 }

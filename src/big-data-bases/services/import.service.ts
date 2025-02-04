@@ -1,32 +1,15 @@
-// ANALYSIS OF THE ISSUE:
-// 1. The current implementation tries to process 4.4M records in batches of 50k
-// 2. Memory management issues may occur due to:
-//    - Keeping all lines in memory after splitting
-//    - No stream processing
-//    - Large batch size may cause memory spikes
-
-// IMPROVED IMPLEMENTATION:
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { DatabaseClient } from '../entities/database-client.entity';
 import { DatabaseService } from './database.service';
 import { ImportResultDto } from '../dto/import-result.dto';
-import { promises as fs } from 'fs';
+import { ContinueImportResultDto } from '../dto/continue-import-result.dto';
 import * as iconv from 'iconv-lite';
-import { createReadStream } from 'fs';
-import * as readline from 'readline';
-
-interface ImportStats {
-    processed: number;
-    success: number;
-    errors: number;
-    elapsed: number;
-}
 
 @Injectable()
 export class ImportService {
-    private readonly batchSize = 10000;
+    private readonly batchSize = 2000;
     
     constructor(
         @InjectRepository(DatabaseClient)
@@ -34,44 +17,169 @@ export class ImportService {
         private databaseService: DatabaseService,
     ) {}
 
-    private async processLineStream(
-        fileStream: NodeJS.ReadableStream,
-        databaseId: string,
-        onProgress: (stats: ImportStats) => void
-    ): Promise<ImportResultDto> {
-        const startTime = Date.now();
-        let currentBatch: DatabaseClient[] = [];
-        let processedCount = 0;
-        let successCount = 0;
-        let errorCount = 0;
-        let isFirstLine = true;
+    private clearAndLogProgress(
+        processedCount: number,
+        successCount: number,
+        errorCount: number,
+        currentLineNumber: number,
+        totalChunks: number,
+        processedChunks: number,
+        startTime: number,
+        lastLogTime: number,
+        force = false
+    ): number {
+        const currentTime = Date.now();
+        const elapsedSeconds = (currentTime - startTime) / 1000;
+        const timeSinceLastLog = currentTime - lastLogTime;
 
-        const rl = readline.createInterface({
-            input: fileStream,
-            crlfDelay: Infinity
-        });
+        if (force || timeSinceLastLog >= 5000) {
+            const progress = (processedChunks / totalChunks) * 100;
+            const rowsPerSecond = processedCount / elapsedSeconds;
+            const memoryUsage = process.memoryUsage();
 
-        for await (const line of rl) {
-            // Skip header
-            if (isFirstLine) {
-                isFirstLine = false;
-                continue;
+            console.log(`
+=================== Статус импорта ===================
+Прогресс: ${progress.toFixed(2)}%
+Обработано строк: ${processedCount.toLocaleString()}
+Успешно: ${successCount.toLocaleString()}
+Ошибок: ${errorCount}
+Текущая строка: ${currentLineNumber}
+Скорость: ${Math.round(rowsPerSecond)} строк/сек
+Память: RSS ${Math.round(memoryUsage.rss / 1024 / 1024)}MB | Heap ${Math.round(memoryUsage.heapUsed / 1024 / 1024)}MB
+====================================================
+            `);
+
+            return currentTime;
+        }
+        return lastLogTime;
+    }
+
+    private clearMemory() {
+        if (global.gc) {
+            global.gc();
+        }
+        const used = process.memoryUsage();
+        console.log(`Очистка памяти:
+            RSS: ${Math.round(used.rss / 1024 / 1024)} MB
+            Heap: ${Math.round(used.heapUsed / 1024 / 1024)} MB`);
+    }
+
+    async continueImportFromLine(
+        file: Express.Multer.File, 
+        databaseId: string, 
+        startFromLine: number,
+        timeout: number = 300000
+    ): Promise<ContinueImportResultDto> {
+        try {
+            if (!file || !file.buffer) {
+                throw new BadRequestException('Invalid file uploaded');
             }
 
-            if (line.trim()) {
-                const [name, phone, address] = line.split('\t').map(field => field?.trim());
-                
-                const client = this.clientRepository.create({
-                    full_name: name || '',
-                    phone: phone || '',
-                    address: address || '',
-                    database: { id: databaseId }
-                });
+            const database = await this.databaseService.findOne(databaseId);
+            if (!database) {
+                throw new BadRequestException('Database not found');
+            }
 
-                currentBatch.push(client);
-                processedCount++;
+            let isTimedOut = false;
+            const timeoutId = setTimeout(() => {
+                isTimedOut = true;
+                console.log('Операция прервана по таймауту');
+            }, timeout);
 
-                if (currentBatch.length >= this.batchSize) {
+            const chunkSize = 2 * 1024 * 1024; // 2MB chunks
+            const totalSize = file.buffer.length;
+            const totalChunks = Math.ceil(totalSize / chunkSize);
+
+            console.log(`
+Начало импорта:
+Размер файла: ${(totalSize / (1024 * 1024)).toFixed(2)} MB
+Всего чанков: ${totalChunks}
+Начальная строка: ${startFromLine}
+            `);
+
+            let processedChunks = 0;
+            let processedCount = 0;
+            let successCount = 0;
+            let errorCount = 0;
+            let remainder = Buffer.from([]);
+            let currentLineNumber = 0;
+            let isFirstChunk = true;
+
+            const startTime = Date.now();
+            let lastLogTime = startTime;
+
+            for (let offset = 0; offset < file.buffer.length; offset += chunkSize) {
+                if (isTimedOut) {
+                    break;
+                }
+
+                const chunk = file.buffer.slice(offset, offset + chunkSize);
+                const bufferWithRemainder = Buffer.concat([remainder, chunk]);
+                const text = iconv.decode(bufferWithRemainder, 'win1251');
+                const lines = text.split('\n');
+
+                remainder = Buffer.from([]);
+
+                if (isFirstChunk) {
+                    lines.shift();
+                    isFirstChunk = false;
+                }
+
+                let currentBatch: DatabaseClient[] = [];
+
+                for (const line of lines) {
+                    currentLineNumber++;
+                    
+                    if (currentLineNumber < startFromLine) {
+                        continue;
+                    }
+
+                    if (!line.trim()) continue;
+
+                    const [name, phone, address] = line.split('\t').map(field => field?.trim());
+
+                    const client = this.clientRepository.create({
+                        full_name: name || '',
+                        phone: phone || '',
+                        address: address || '',
+                        database: { id: databaseId }
+                    });
+
+                    currentBatch.push(client);
+                    processedCount++;
+
+                    if (currentBatch.length >= this.batchSize) {
+                        try {
+                            await this.clientRepository
+                                .createQueryBuilder()
+                                .insert()
+                                .into(DatabaseClient)
+                                .values(currentBatch)
+                                .execute();
+
+                            successCount += currentBatch.length;
+                        } catch (error) {
+                            console.error('Batch insert failed:', error);
+                            errorCount += currentBatch.length;
+                        }
+
+                        currentBatch = [];
+                        this.clearMemory();
+
+                        lastLogTime = this.clearAndLogProgress(
+                            processedCount,
+                            successCount,
+                            errorCount,
+                            currentLineNumber,
+                            totalChunks,
+                            processedChunks,
+                            startTime,
+                            lastLogTime
+                        );
+                    }
+                }
+
+                if (currentBatch.length > 0) {
                     try {
                         await this.clientRepository
                             .createQueryBuilder()
@@ -79,89 +187,33 @@ export class ImportService {
                             .into(DatabaseClient)
                             .values(currentBatch)
                             .execute();
-                        
+
                         successCount += currentBatch.length;
                     } catch (error) {
+                        console.error('Final batch insert failed:', error);
                         errorCount += currentBatch.length;
-                        console.error(`Batch insert failed:`, error);
-                    }
-
-                    // Report progress
-                    onProgress({
-                        processed: processedCount,
-                        success: successCount,
-                        errors: errorCount,
-                        elapsed: Date.now() - startTime
-                    });
-
-                    // Clear batch
-                    currentBatch = [];
-                }
-            }
-        }
-
-        // Process remaining records
-        if (currentBatch.length > 0) {
-            try {
-                await this.clientRepository
-                    .createQueryBuilder()
-                    .insert()
-                    .into(DatabaseClient)
-                    .values(currentBatch)
-                    .execute();
-                
-                successCount += currentBatch.length;
-            } catch (error) {
-                errorCount += currentBatch.length;
-                console.error(`Final batch insert failed:`, error);
-            }
-        }
-
-        return {
-            totalProcessed: processedCount,
-            successCount,
-            errorCount,
-            message: 'Import completed'
-        };
-    }
-
-    async importFile(file: Express.Multer.File, databaseId: string): Promise<ImportResultDto> {
-        const startTime = Date.now();
-        let lastStatsTime = Date.now();
-        const statsInterval = 20000; // 20 seconds
-
-        try {
-            const database = await this.databaseService.findOne(databaseId);
-            console.log(`Database found: ${database.name}`);
-
-            // Create a read stream instead of loading entire file
-            const fileStream = createReadStream(file.path);
-            const decodingStream = iconv.decodeStream('win1251');
-            
-            const result = await this.processLineStream(
-                fileStream.pipe(decodingStream),
-                databaseId,
-                (stats) => {
-                    const currentTime = Date.now();
-                    if (currentTime - lastStatsTime >= statsInterval) {
-                        console.log('Import progress:', stats);
-                        lastStatsTime = currentTime;
                     }
                 }
-            );
 
-            return result;
+                processedChunks++;
+                this.clearMemory();
+            }
+
+            clearTimeout(timeoutId);
+
+            return {
+                totalProcessed: processedCount,
+                successCount,
+                errorCount,
+                message: isTimedOut ? 'Импорт прерван по таймауту' : 'Импорт успешно завершен',
+                lastProcessedLine: currentLineNumber,
+                startFromLine: startFromLine,
+                status: isTimedOut ? 'timeout' : 'completed'
+            };
 
         } catch (error) {
             console.error('Import failed:', error);
             throw new BadRequestException(`Import failed: ${error.message}`);
-        } finally {
-            try {
-                await fs.unlink(file.path);
-                console.log('Temporary file cleaned up');
-            } catch (error) {
-                console.error('Failed to clean up temporary file:', error);
-            }
         }
     }
 }
