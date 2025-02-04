@@ -25,7 +25,7 @@ import {
     ApiBadRequestResponse,
     ApiNotFoundResponse
 } from '@nestjs/swagger';
-import { memoryStorage } from 'multer';  // Changed from diskStorage to memoryStorage
+import { memoryStorage } from 'multer';  
 import { DatabaseService } from '../services/database.service';
 import { ImportService } from '../services/import.service';
 import { CreateDatabaseDto } from '../dto/create-database.dto';
@@ -236,5 +236,23 @@ async continueImport(
     @Query('startFromLine', ParseIntPipe) startFromLine: number
 ): Promise<ContinueImportResultDto> {
     return this.importService.continueImportFromLine(file, databaseId, startFromLine);
+}
+@Delete('databases/:id')
+@ApiOperation({ 
+    summary: 'Delete database with all clients',
+    description: 'Deletes database and all its associated client records'
+})
+@ApiResponse({
+    status: 200,
+    description: 'Database has been successfully deleted'
+})
+@ApiNotFoundResponse({
+    description: 'Database not found'
+})
+@HttpCode(HttpStatus.OK)
+async deleteDatabase(
+    @Param('id') id: string
+): Promise<void> {
+    await this.databaseService.remove(id);
 }
 }
