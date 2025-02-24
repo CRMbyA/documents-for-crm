@@ -1,0 +1,9 @@
+{
+  "id": "1740411354133",
+  "originalFileName": "1740409503757-815599339.csv",
+  "totalRecords": 16314006,
+  "partitionsCount": 16315,
+  "partitionSize": 1000,
+  "createdAt": "2025-02-24T15:35:54.133Z",
+  "phoneColumn": "cmainphonenum"
+}
