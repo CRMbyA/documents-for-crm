@@ -1,0 +1,9 @@
+{
+  "id": "1740469607880",
+  "originalFileName": "rosreestr_part.txt",
+  "totalRecords": 6951501,
+  "partitionsCount": 696,
+  "partitionSize": 10000,
+  "createdAt": "2025-02-25T07:46:47.880Z",
+  "phoneColumn": "phone"
+}
