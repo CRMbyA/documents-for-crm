@@ -1,0 +1,9 @@
+{
+  "id": "1741820790991",
+  "originalFileName": "МТС 2023 21кк.csv",
+  "totalRecords": 16710630,
+  "partitionsCount": 1672,
+  "partitionSize": 10000,
+  "createdAt": "2025-03-12T23:06:30.991Z",
+  "phoneColumn": "Телефон"
+}

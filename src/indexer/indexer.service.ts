@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import { statSync, createReadStream, existsSync, mkdirSync } from 'fs';
 import * as path from 'path';
 import * as readline from 'readline';
+import * as iconv from 'iconv-lite';
 import { CreateIndexDto } from './dto/create-index.dto';
 import { IndexMetadata, DatabaseStatsResponse } from './types/index.types';
 
@@ -62,6 +63,10 @@ export class IndexerService {
       throw new Error(`Файл не существует: ${filePath}`);
     }
     
+    // Определяем кодировку файла (используем указанную в параметрах или utf8 по умолчанию)
+    const encoding = dto.encoding || 'utf8';
+    this.logger.log(`Используется кодировка: ${encoding}`);
+    
     // Создаем директорию для базы данных
     const databaseDir = path.join(this.baseDir, dto.databaseId);
     this.logger.log(`Создание директории базы данных: ${databaseDir}`);
@@ -80,7 +85,7 @@ export class IndexerService {
       partitionsCount: 0,
       partitionSize: this.PARTITION_SIZE,
       createdAt: new Date(),
-      phoneColumn: 'phone'
+      phoneColumn: dto.phoneColumn || 'phone'
     };
 
     // Запустим таймер для периодических отчетов
@@ -90,49 +95,99 @@ export class IndexerService {
 
     let buffer: { [key: string]: any } = {};
     let processed = 0;
+    let headers: string[] = [];
     
     return new Promise<IndexMetadata>((resolve, reject) => {
       try {
+        // Создаем поток чтения с поддержкой кодировки
         const fileStream = createReadStream(filePath, { 
-          highWaterMark: 1024 * 1024 * 10 // 10MB буфер чтения для оптимизации
+          highWaterMark: 64 * 1024 // Увеличиваем размер буфера для быстрого чтения
         });
         
+        // Используем iconv для конвертации кодировки, если нужно
+        let streamToUse: NodeJS.ReadableStream = fileStream;
+        
+        if (encoding !== 'utf8') {
+          const encodingMap: Record<string, string> = {
+            'windows1251': 'win1251',
+            'koi8r': 'koi8-r',
+            'iso88595': 'iso-8859-5'
+          };
+          const iconvEncoding = encodingMap[encoding] || encoding;
+          streamToUse = fileStream.pipe(iconv.decodeStream(iconvEncoding));
+        }
+        
         const rl = readline.createInterface({
-          input: fileStream,
+          input: streamToUse,
           crlfDelay: Infinity
         });
 
+        let isFirstLine = true;
+
         rl.on('line', (line) => {
           this.processingStats.processedLines++;
-          this.processingStats.bytesProcessed += line.length + 1; // +1 для символа новой строки
+          this.processingStats.bytesProcessed += Buffer.byteLength(line, 'utf8') + 1; // +1 для символа новой строки
           
           try {
-            // Разбиваем строку по табуляциям
-            const fields = line.split('\t');
+            // Извлекаем строку из поля "_0" (так как все данные находятся в этом поле)
+            let rawData = line;
             
-            // Оптимизированный поиск телефона (проверяем только некоторые поля)
-            let phone = this.findAndNormalizePhone(fields);
+            // Если строка начинается с кавычек или содержит другие специальные символы JSON
+            if (line.startsWith('{"') || line.includes('_0')) {
+              try {
+                const parsedLine = JSON.parse(line);
+                rawData = parsedLine._0 || line;
+              } catch (e) {
+                // Если не удалось разобрать JSON, используем строку как есть
+                rawData = line;
+              }
+            }
             
-            if (phone) {
-              const firstDigits = phone.substring(0, 3); // Группируем по первым цифрам номера
-              this.processingStats.prefixesFound.add(firstDigits);
+            // Разбиваем строку на поля по разделителю "|"
+            const fields = rawData.split('|');
+            
+            // Обрабатываем заголовки в первой строке
+            if (isFirstLine) {
+              headers = fields.map(h => h.trim());
+              isFirstLine = false;
               
-              if (!buffer[firstDigits]) {
-                buffer[firstDigits] = {};
+              this.logger.log(`Обнаружены заголовки: ${headers.join(', ')}`);
+              return;
+            }
+            
+            // Проверяем, что у нас достаточно полей
+            if (fields.length >= 5) { // Минимум 5 полей для обработки (включая телефон)
+              // Извлекаем телефон (5-е поле по счету, индекс 4)
+              const phoneIndex = 4; // Индекс поля с телефоном
+              let phone = phoneIndex < fields.length ? fields[phoneIndex].trim() : null;
+              
+              if (phone) {
+                phone = this.normalizePhone(phone);
+                
+                if (phone) {
+                  const firstDigits = phone.substring(0, 3); // Группируем по первым цифрам номера
+                  this.processingStats.prefixesFound.add(firstDigits);
+                  
+                  if (!buffer[firstDigits]) {
+                    buffer[firstDigits] = {};
+                  }
+                  
+                  // Создаем запись с указанием полей по заголовкам
+                  buffer[firstDigits][phone] = this.extractPipeDelimitedData(fields, headers);
+                  
+                  processed++;
+                  this.processingStats.recordsFound++;
+                  
+                  // Сохраняем когда накопилось достаточно записей
+                  if (processed >= this.CHUNK_SIZE) {
+                    this.saveBufferToDisk(databaseDir, buffer);
+                    buffer = {};
+                    processed = 0;
+                  }
+                }
               }
-              
-              // Извлекаем нужные поля - оптимизированная версия
-              buffer[firstDigits][phone] = this.extractRecordData(fields, phone);
-              
-              processed++;
-              this.processingStats.recordsFound++;
-              
-              // Сохраняем когда накопилось достаточно записей
-              if (processed >= this.CHUNK_SIZE) {
-                this.saveBufferToDisk(databaseDir, buffer);
-                buffer = {};
-                processed = 0;
-              }
+            } else {
+              this.logger.debug(`Строка не содержит достаточно полей: ${rawData}`);
             }
           } catch (lineError) {
             // Продолжаем работу даже при ошибке в одной строке
@@ -184,6 +239,68 @@ export class IndexerService {
         reject(error);
       }
     });
+  }
+
+  // Нормализация телефонного номера
+  private normalizePhone(phone: string): string | null {
+    if (!phone) return null;
+    
+    // Удаляем лишние кавычки, если они есть
+    phone = phone.replace(/^["']+|["']+$/g, '');
+    
+    // Извлекаем только цифры
+    const digits = phone.replace(/\D/g, '');
+    
+    // Проверка на валидную длину
+    if (digits.length >= 10 && digits.length <= 12) {
+      // Нормализация
+      if (digits.length === 10) {
+        return '7' + digits;
+      } else if (digits.length === 11) {
+        if (digits[0] === '8') {
+          return '7' + digits.substring(1);
+        } else if (digits[0] === '7') {
+          return digits;
+        }
+      }
+    }
+    
+    return null;
+  }
+
+  // Извлечение данных из строки с разделителем "|"
+  private extractPipeDelimitedData(fields: string[], headers: string[]): any {
+    const record: any = {};
+    
+    // Заполняем все доступные поля по заголовкам
+    for (let i = 0; i < Math.min(fields.length, headers.length); i++) {
+      const header = headers[i];
+      const value = fields[i]?.trim() || '';
+      record[header] = value;
+      
+      // Добавляем оригинальные индексированные поля для совместимости
+      record[`_${i}`] = value;
+    }
+    
+    // Добавляем обработанные основные поля
+    record.lastName = fields[0]?.trim() || '';
+    record.firstName = fields[1]?.trim() || '';
+    record.middleName = fields[2]?.trim() || '';
+    record.fullName = `${record.lastName} ${record.firstName} ${record.middleName}`.trim();
+    record.birthDate = fields[3]?.trim() || '';
+    
+    // Обрабатываем телефон
+    const phoneRaw = fields[4]?.trim() || '';
+    const normalizedPhone = this.normalizePhone(phoneRaw) || '';
+    record.phone = normalizedPhone;
+    record.formattedPhone = this.formatPhoneNumber(normalizedPhone);
+    
+    // Добавляем дополнительные поля
+    if (headers.length > 5) record.snils = fields[5]?.trim() || '';
+    if (headers.length > 6) record.inn = fields[6]?.trim() || '';
+    if (headers.length > 7) record.email = fields[7]?.trim() || '';
+    
+    return record;
   }
 
   // Сброс статистики перед началом новой индексации
@@ -256,70 +373,6 @@ export class IndexerService {
     this.processingStats.lastChunkLines = this.processingStats.processedLines;
   }
 
-  // Оптимизированный поиск и нормализация телефона
-  private findAndNormalizePhone(fields: string[]): string | null {
-    // Оптимизированный поиск: проверяем только определенные позиции
-    const positionsToCheck = [24, 25, 23, 26, 22, 27];
-    
-    for (const pos of positionsToCheck) {
-      if (pos < fields.length && fields[pos]) {
-        const field = fields[pos].trim();
-        
-        // Быстрая предварительная проверка на наличие цифр
-        if (/\d/.test(field)) {
-          // Извлекаем только цифры
-          const digits = field.replace(/\D/g, '');
-          
-          // Проверка на валидную длину
-          if (digits.length >= 10 && digits.length <= 11) {
-            // Нормализация
-            if (digits.length === 10) {
-              return '7' + digits;
-            } else if (digits.length === 11) {
-              if (digits[0] === '8') {
-                return '7' + digits.substring(1);
-              } else if (digits[0] === '7') {
-                return digits;
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    return null;
-  }
-
-  // Извлечение данных для записи
-  private extractRecordData(fields: string[], phone: string): any {
-    // Оптимизированная версия - извлекаем только нужные поля
-    const safeGet = (index: number): string => {
-      return index < fields.length ? fields[index]?.trim() || '' : '';
-    };
-    
-    return {
-      id: safeGet(0),
-      fullName: `${safeGet(5)} ${safeGet(6)} ${safeGet(7)}`.trim(),
-      firstName: safeGet(6),
-      lastName: safeGet(5),
-      middleName: safeGet(7),
-      gender: safeGet(8),
-      birthDate: safeGet(17),
-      birthPlace: safeGet(18),
-      passportData: `${safeGet(9)} ${safeGet(11)} ${safeGet(12)} ${safeGet(13)}`.trim(),
-      inn: safeGet(22),
-      address: safeGet(27),
-      phone: phone,
-      formattedPhone: this.formatPhoneNumber(phone)
-    };
-  }
-
-  // Форматирование телефонного номера для отображения
-  private formatPhoneNumber(phone: string): string {
-    if (phone.length !== 11) return phone;
-    return `+${phone[0]} (${phone.substring(1, 4)}) ${phone.substring(4, 7)}-${phone.substring(7, 9)}-${phone.substring(9, 11)}`;
-  }
-
   // Сохранение буфера на диск
   private async saveBufferToDisk(databaseDir: string, buffer: { [key: string]: any }): Promise<void> {
     const prefixCount = Object.keys(buffer).length;
@@ -350,6 +403,12 @@ export class IndexerService {
       this.logger.error(`Ошибка сохранения метаданных: ${error.message}`);
       throw error;
     }
+  }
+
+  // Форматирование телефонного номера для отображения
+  private formatPhoneNumber(phone: string): string {
+    if (phone.length !== 11) return phone;
+    return `+${phone[0]} (${phone.substring(1, 4)}) ${phone.substring(4, 7)}-${phone.substring(7, 9)}-${phone.substring(9, 11)}`;
   }
 
   // Форматирование байтов в человекочитаемый формат
@@ -516,7 +575,6 @@ export class IndexerService {
   }
 
   async findByPhoneParallel(phone: string): Promise<any> {
-    // ...existing code...
     try {
       const databases = await this.getAllDatabases();
       const batchSize = 3; // Ограничиваем количество одновременных поисков
@@ -568,7 +626,6 @@ export class IndexerService {
       currentDatabaseIndex?: number;
     }) => void
   ): Promise<void> {
-    // ...existing code...
     try {
       const databases = await this.getAllDatabases();
       
@@ -666,7 +723,6 @@ export class IndexerService {
   }
 
   async getAllDatabases(): Promise<string[]> {
-    // ...existing code...
     try {
       // Проверяем существование базовой директории
       if (!existsSync(this.baseDir)) {
@@ -690,7 +746,6 @@ export class IndexerService {
   }
 
   async getDatabaseStats(): Promise<DatabaseStatsResponse> {
-    // ...existing code...
     try {
       const databases = await this.getAllDatabases();
       const stats: DatabaseStatsResponse = {
@@ -733,7 +788,6 @@ export class IndexerService {
     prefixes: string[];
     createdAt: Date;
   }> {
-    // ...existing code...
     try {
       const dbPath = path.join(this.baseDir, databaseId);
       

@@ -10,4 +10,9 @@ export class CreateIndexDto {
 
   @ApiProperty({ description: 'Размер одной партиции (по умолчанию 100)' })
   partitionSize?: number;
+
+
+  @ApiProperty({ description: 'Кодировка' })
+  encoding?: 'utf8' | 'windows1251' | 'koi8r' | 'iso88595' | 'auto';
+
 }

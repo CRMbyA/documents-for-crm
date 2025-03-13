@@ -1,5 +1,5 @@
-import { Controller, Post, Get, Param, Sse, Logger, HttpException, HttpStatus } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { Controller, Post, Get, Param, Sse, Logger, HttpException, HttpStatus, Query } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { IndexerService } from './indexer.service';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -43,85 +43,110 @@ export class IndexerController {
   }
 
   @Post(':filename')
-  @ApiOperation({ summary: 'Создать индекс для файла' })
-  async createIndex(@Param('filename') filename: string) {
-    this.logger.log(`Request to create index for file: ${filename}`);
+@ApiOperation({ summary: 'Создать индекс для файла (поддерживаются TXT и CSV)' })
+@ApiParam({ name: 'filename', description: 'Имя файла для индексации' })
+@ApiQuery({ 
+  name: 'encoding', 
+  description: 'Кодировка файла (для CSV)', 
+  required: false,
+  enum: ['utf8', 'windows1251', 'koi8r', 'iso88595', 'auto']
+})
+async createIndex(
+  @Param('filename') filename: string,
+  @Query('encoding') encoding: string = 'auto'
+) {
+  this.logger.log(`Request to create index for file: ${filename}`);
+  
+  try {
+    // Проверка различных вариантов пути к файлу
+    let filePath = '';
+    let fileExists = false;
     
-    try {
-      // Проверка различных вариантов пути к файлу
-      let filePath = '';
-      let fileExists = false;
-      
-      // 1. Проверяем, если это абсолютный путь
-      if (path.isAbsolute(filename)) {
-        this.logger.log(`Checking absolute path: ${filename}`);
-        if (fs.existsSync(filename)) {
-          filePath = filename;
-          fileExists = true;
-          this.logger.log(`File found at absolute path: ${filePath}`);
-        }
+    // 1. Проверяем, если это абсолютный путь
+    if (path.isAbsolute(filename)) {
+      this.logger.log(`Checking absolute path: ${filename}`);
+      if (fs.existsSync(filename)) {
+        filePath = filename;
+        fileExists = true;
+        this.logger.log(`File found at absolute path: ${filePath}`);
       }
-      
-      // 2. Проверяем в директории uploads
-      if (!fileExists) {
-        const relativePath = path.join(process.cwd(), 'uploads', path.basename(filename));
-        this.logger.log(`Checking in uploads dir: ${relativePath}`);
-        if (fs.existsSync(relativePath)) {
-          filePath = relativePath;
-          fileExists = true;
-          this.logger.log(`File found in uploads directory: ${filePath}`);
-        }
-      }
-      
-      // 3. Проверяем в корне проекта
-      if (!fileExists) {
-        const projectRootPath = path.join(process.cwd(), path.basename(filename));
-        this.logger.log(`Checking in project root: ${projectRootPath}`);
-        if (fs.existsSync(projectRootPath)) {
-          filePath = projectRootPath;
-          fileExists = true;
-          this.logger.log(`File found in project root: ${filePath}`);
-        }
-      }
-      
-      // Если файл не найден
-      if (!fileExists) {
-        this.logger.error(`File not found: ${filename}`);
-        throw new HttpException(`File not found: ${filename}`, HttpStatus.NOT_FOUND);
-      }
-      
-      // Проверяем, что это файл, а не директория
-      const stats = fs.statSync(filePath);
-      if (!stats.isFile()) {
-        this.logger.error(`Path exists but is not a file: ${filePath}`);
-        throw new HttpException(`Path is not a file: ${filePath}`, HttpStatus.BAD_REQUEST);
-      }
-      
-      // Выводим информацию о размере файла
-      this.logger.log(`File size: ${stats.size} bytes`);
-      
-      // Определяем ID базы данных из имени файла
-      const databaseId = path.basename(filePath, path.extname(filePath));
-      this.logger.log(`Using database ID: ${databaseId}`);
-
-      // Запускаем создание индекса
-      this.logger.log(`Starting index creation for ${filePath} with database ID ${databaseId}`);
-      const result = await this.indexerService.createIndex(filePath, {
-        databaseId,
-        phoneColumn: 'cmainphonenum', // Для txt файлов игнорируется
-        partitionSize: 100
-      });
-      
-      this.logger.log(`Index created successfully. Total records: ${result.totalRecords}`);
-      return result;
-    } catch (error) {
-      this.logger.error(`Error creating index for ${filename}: ${error.message}`, error.stack);
-      throw new HttpException(
-        `Failed to create index: ${error.message}`, 
-        HttpStatus.INTERNAL_SERVER_ERROR
-      );
     }
+    
+    // 2. Проверяем в директории uploads
+    if (!fileExists) {
+      const relativePath = path.join(process.cwd(), 'uploads', path.basename(filename));
+      this.logger.log(`Checking in uploads dir: ${relativePath}`);
+      if (fs.existsSync(relativePath)) {
+        filePath = relativePath;
+        fileExists = true;
+        this.logger.log(`File found in uploads directory: ${filePath}`);
+      }
+    }
+    
+    // 3. Проверяем в корне проекта
+    if (!fileExists) {
+      const projectRootPath = path.join(process.cwd(), path.basename(filename));
+      this.logger.log(`Checking in project root: ${projectRootPath}`);
+      if (fs.existsSync(projectRootPath)) {
+        filePath = projectRootPath;
+        fileExists = true;
+        this.logger.log(`File found in project root: ${filePath}`);
+      }
+    }
+    
+    // Если файл не найден
+    if (!fileExists) {
+      this.logger.error(`File not found: ${filename}`);
+      throw new HttpException(`File not found: ${filename}`, HttpStatus.NOT_FOUND);
+    }
+    
+    // Проверяем, что это файл, а не директория
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile()) {
+      this.logger.error(`Path exists but is not a file: ${filePath}`);
+      throw new HttpException(`Path is not a file: ${filePath}`, HttpStatus.BAD_REQUEST);
+    }
+    
+    // Выводим информацию о размере файла
+    this.logger.log(`File size: ${stats.size} bytes`);
+    
+    // Определяем ID базы данных из имени файла
+    const databaseId = path.basename(filePath, path.extname(filePath));
+    this.logger.log(`Using database ID: ${databaseId}`);
+
+    // Определяем тип файла по расширению
+    const fileExtension = path.extname(filePath).toLowerCase();
+    this.logger.log(`File extension: ${fileExtension}`);
+    
+    let phoneColumn = 'cmainphonenum'; // Для TXT файлов
+    
+    // Если это CSV файл, настраиваем соответствующие параметры
+    if (fileExtension === '.csv') {
+      this.logger.log(`Processing as CSV file with encoding: ${encoding}`);
+      phoneColumn = 'Телефон'; // Для CSV файлов
+    } else {
+      this.logger.log(`Processing as TXT file`);
+    }
+
+    // Запускаем создание индекса
+    this.logger.log(`Starting index creation for ${filePath} with database ID ${databaseId}`);
+    const result = await this.indexerService.createIndex(filePath, {
+      databaseId,
+      phoneColumn,
+      partitionSize: 100,
+      encoding: encoding as any // Передаем кодировку для CSV файлов
+    });
+    
+    this.logger.log(`Index created successfully. Total records: ${result.totalRecords}`);
+    return result;
+  } catch (error) {
+    this.logger.error(`Error creating index for ${filename}: ${error.message}`, error.stack);
+    throw new HttpException(
+      `Failed to create index: ${error.message}`, 
+      HttpStatus.INTERNAL_SERVER_ERROR
+    );
   }
+}
 
   @Sse('search-stream/:phone')
   @ApiOperation({ summary: 'Потоковый поиск по номеру телефона с прогрессом' })
