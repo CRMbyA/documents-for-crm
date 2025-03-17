@@ -187,12 +187,22 @@ async createIndex(
       
       if (result) {
         this.logger.log(`Found record for phone ${phone}`);
+        return result;
       } else {
         this.logger.log(`No record found for phone ${phone}`);
+        throw new HttpException(
+          `Телефон ${phone} не найден ни в одной базе данных`, 
+          HttpStatus.NOT_FOUND
+        );
+      }
+    } catch (error) {
+      // Check if this is a "not found" error thrown by the service
+      if (error.message && error.message.includes('не найден ни в одной базе данных')) {
+        this.logger.log(`Phone ${phone} not found in any database`);
+        throw new HttpException(error.message, HttpStatus.NOT_FOUND);
       }
       
-      return result;
-    } catch (error) {
+      // Otherwise it's a server error
       this.logger.error(`Error searching for phone ${phone}: ${error.message}`, error.stack);
       throw new HttpException(
         `Failed to search: ${error.message}`, 

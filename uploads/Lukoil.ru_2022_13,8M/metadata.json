@@ -1,9 +1,0 @@
-{
-  "id": "1741819837021",
-  "originalFileName": "Lukoil.ru_2022_13,8M.csv",
-  "totalRecords": 13807079,
-  "partitionsCount": 1381,
-  "partitionSize": 10000,
-  "createdAt": "2025-03-12T22:50:37.021Z",
-  "phoneColumn": "Телефон"
-}

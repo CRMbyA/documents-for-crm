@@ -1,9 +1,0 @@
-{
-  "id": "1741821966124",
-  "originalFileName": "RussianTAX 2022 @DBC_links .csv",
-  "totalRecords": 55359468,
-  "partitionsCount": 5536,
-  "partitionSize": 10000,
-  "createdAt": "2025-03-12T23:26:06.124Z",
-  "phoneColumn": "Телефон"
-}
