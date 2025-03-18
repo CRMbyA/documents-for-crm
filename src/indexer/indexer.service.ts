@@ -6,7 +6,6 @@ import * as readline from 'readline';
 import { CreateIndexDto } from './dto/create-index.dto';
 import { IndexMetadata, DatabaseStatsResponse } from './types/index.types';
 
-// Custom error class for better error handling
 export class PhoneNumberNotFoundException extends NotFoundException {
   constructor(phone: string, databaseId: string | null = null) {
     const message = databaseId
@@ -20,12 +19,17 @@ export class PhoneNumberNotFoundException extends NotFoundException {
 @Injectable()
 export class IndexerService {
   private readonly logger = new Logger(IndexerService.name);
-  private readonly basePrefix = ''; // Пустой префикс, т.к. нет структуры с префиксами
+  private readonly basePrefix = '';
   private readonly PARTITION_SIZE = 10000;
   private readonly CHUNK_SIZE = 50000;
   private readonly REPORT_INTERVAL = 5000;
   private readonly s3: S3;
   private readonly bucketName: string;
+  
+  private readonly AWS_ACCESS_KEY_ID = 'AKIAX5ZI6GEMTESC256W';
+  private readonly AWS_SECRET_ACCESS_KEY = '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';
+  private readonly AWS_REGION = 'eu-west-2';
+  private readonly S3_BUCKET_NAME = 'bdb-indexing';
   
   private indexingInProgress = false;
   private processingStats = {
@@ -45,20 +49,243 @@ export class IndexerService {
   };
 
   constructor() {
-    // Используем значения по умолчанию для разработки
-    const accessKeyId = process.env.AWS_ACCESS_KEY_ID || '';
-    const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY || '';
-    
     this.s3 = new S3({
-      region: process.env.AWS_REGION || 'eu-west-2',
+      region: this.AWS_REGION,
       credentials: {
-        accessKeyId,
-        secretAccessKey
+        accessKeyId: this.AWS_ACCESS_KEY_ID,
+        secretAccessKey: this.AWS_SECRET_ACCESS_KEY
       }
     });
     
-    this.bucketName = process.env.S3_BUCKET_NAME || 'bdb-indexing';
+    this.bucketName = this.S3_BUCKET_NAME;
     this.logger.log(`Инициализация S3IndexerService с бакетом: ${this.bucketName}`);
+  }
+
+  async findByPhoneWithProgress(
+    phone: string, 
+    progressCallback: (progress: {
+      currentDatabase: string;
+      progress: number;
+      searching: boolean;
+      found: boolean;
+      result?: any;
+      isComplete: boolean;
+      totalDatabases?: number;
+      currentDatabaseIndex?: number;
+      error?: string;
+    }) => void
+  ): Promise<void> {
+    try {
+      const databases = await this.getAllDatabases();
+      
+      if (databases.length === 0) {
+        this.logger.log(`ℹ️ Нет доступных баз данных для поиска`);
+        progressCallback({
+          currentDatabase: '',
+          progress: 100,
+          searching: false,
+          found: false,
+          isComplete: true,
+          totalDatabases: 0,
+          currentDatabaseIndex: 0,
+          error: 'Нет доступных баз данных для поиска'
+        });
+        return;
+      }
+      
+      const total = databases.length;
+      this.logger.log(`🔍 Поиск с прогрессом по телефону "${phone}" в ${total} базах данных`);
+
+      progressCallback({
+        currentDatabase: databases[0],
+        progress: 0,
+        searching: true,
+        found: false,
+        isComplete: false,
+        totalDatabases: total,
+        currentDatabaseIndex: 0
+      });
+
+      for (let i = 0; i < databases.length; i++) {
+        const databaseId = databases[i];
+        const currentProgress = Math.round((i / total) * 100);
+        this.logger.log(`🔄 Поиск в базе "${databaseId}" (${i+1}/${total}, ${currentProgress}%)`);
+
+        progressCallback({
+          currentDatabase: databaseId,
+          progress: currentProgress,
+          searching: true,
+          found: false,
+          isComplete: false,
+          totalDatabases: total,
+          currentDatabaseIndex: i
+        });
+
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        try {
+          const result = await this.findByPhone(databaseId, phone)
+            .catch(error => {
+              if (error instanceof PhoneNumberNotFoundException) {
+                return null;
+              }
+              throw error;
+            });
+            
+          if (result) {
+            this.logger.log(`✅ Запись найдена в базе "${databaseId}"`);
+            progressCallback({
+              currentDatabase: databaseId,
+              progress: 100,
+              searching: false,
+              found: true,
+              result: { database: databaseId, ...result },
+              isComplete: true,
+              totalDatabases: total,
+              currentDatabaseIndex: i + 1
+            });
+            return;
+          }
+        } catch (error) {
+          this.logger.error(`❌ Ошибка поиска в базе ${databaseId}: ${error.message}`);
+          progressCallback({
+            currentDatabase: databaseId,
+            progress: currentProgress,
+            searching: false,
+            found: false,
+            isComplete: false,
+            totalDatabases: total,
+            currentDatabaseIndex: i,
+            error: `Ошибка поиска в базе ${databaseId}: ${error.message}`
+          });
+        }
+      }
+
+      this.logger.log(`❌ Запись не найдена во всех базах данных`);
+      progressCallback({
+        currentDatabase: databases[databases.length - 1],
+        progress: 100,
+        searching: false,
+        found: false,
+        result: null,
+        isComplete: true,
+        totalDatabases: total,
+        currentDatabaseIndex: total,
+        error: `Телефон ${phone} не найден ни в одной базе данных`
+      });
+
+    } catch (error) {
+      this.logger.error(`❌ Ошибка в поиске с прогрессом: ${error.message}`);
+      progressCallback({
+        currentDatabase: '',
+        progress: 100,
+        searching: false,
+        found: false,
+        result: null,
+        isComplete: true,
+        totalDatabases: 0,
+        currentDatabaseIndex: 0,
+        error: `Ошибка поиска: ${error.message}`
+      });
+    }
+  }
+
+  async getAllDatabases(): Promise<string[]> {
+    try {
+      const folders = await this.listFolders();
+      this.logger.log(`🔍 Получение списка всех баз данных из корня бакета`);
+      this.logger.log(`✅ Найдено ${folders.length} баз данных: ${folders.join(', ')}`);
+      
+      return folders;
+    } catch (error) {
+      this.logger.error(`❌ Ошибка получения списка баз данных: ${error.message}`);
+      return [];
+    }
+  }
+
+  async getDatabaseStats(): Promise<DatabaseStatsResponse> {
+    try {
+      const databases = await this.getAllDatabases();
+      this.logger.log(`🔍 Получение статистики для ${databases.length} баз данных`);
+      
+      const stats: DatabaseStatsResponse = {
+        totalDatabases: databases.length,
+        totalRecords: 0,
+        databases: []
+      };
+
+      for (const dbId of databases) {
+        try {
+          this.logger.log(`📊 Получение статистики для базы "${dbId}"`);
+          const dbStats = await this.getSingleDatabaseStats(dbId);
+          stats.totalRecords += dbStats.totalRecords;
+          stats.databases.push({
+            id: dbId,
+            records: dbStats.totalRecords,
+            partitions: dbStats.partitions
+          });
+          this.logger.log(`✅ Статистика базы "${dbId}": ${dbStats.totalRecords} записей, ${dbStats.partitions} партиций`);
+        } catch (error) {
+          this.logger.error(`❌ Ошибка получения статистики для базы ${dbId}: ${error.message}`);
+          stats.databases.push({
+            id: dbId,
+            records: 0,
+            partitions: 0
+          });
+        }
+      }
+
+      this.logger.log(`📈 Общая статистика: ${stats.totalDatabases} баз данных, ${stats.totalRecords} записей`);
+      return stats;
+    } catch (error) {
+      this.logger.error(`❌ Ошибка получения статистики баз данных: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async getSingleDatabaseStats(databaseId: string): Promise<{
+    databaseId: string;
+    totalRecords: number;
+    partitions: number;
+    prefixes: string[];
+    createdAt: Date;
+  }> {
+    try {
+      const dbFolder = `${databaseId}/`;
+      this.logger.log(`🔍 Получение статистики для базы "${databaseId}"`);
+      
+      const dbExists = await this.prefixExists(dbFolder);
+      if (!dbExists) {
+        this.logger.warn(`⚠️ Директория базы данных не существует: ${dbFolder}`);
+        throw new Error(`Директория базы данных не существует: ${dbFolder}`);
+      }
+      
+      const metadataKey = `${dbFolder}metadata.json`;
+      this.logger.log(`📖 Чтение метаданных из файла "${metadataKey}"`);
+      
+      let metadata: any = {};
+      try {
+        metadata = await this.readJsonFile(metadataKey);
+      } catch (error) {
+        this.logger.error(`❌ Ошибка чтения метаданных: ${error.message}`);
+        throw new Error(`Файл метаданных не существует или поврежден: ${metadataKey}`);
+      }
+      
+      this.logger.log(`📁 Получение списка префиксов в базе "${databaseId}"`);
+      const prefixes = await this.listFolders(dbFolder);
+      this.logger.log(`✅ Найдено ${prefixes.length} префиксов`);
+
+      return {
+        databaseId,
+        totalRecords: metadata.totalRecords || 0,
+        partitions: metadata.partitionsCount || 0,
+        prefixes,
+        createdAt: new Date(metadata.createdAt)
+      };
+    } catch (error) {
+      this.logger.error(`❌ Ошибка получения статистики для базы ${databaseId}: ${error.message}`);
+      throw error;
+    }
   }
 
   private async objectExists(key: string): Promise<boolean> {
@@ -135,14 +362,11 @@ export class IndexerService {
       const content = response.Body.toString('utf-8');
       
       try {
-        // Try regular JSON parsing first
         return JSON.parse(content);
       } catch (jsonError) {
         this.logger.warn(`Ошибка первичного парсинга JSON для файла ${key}: ${jsonError.message}`);
         
-        // Attempt repair strategies for common JSON corruption issues
         try {
-          // Strategy 1: Find the last valid JSON object by matching the final closing brace
           this.logger.log(`Попытка восстановления JSON данных для файла ${key} (стратегия 1)`);
           const match = /^([^]*})(?:\s*[^]*)?$/s.exec(content);
           
@@ -159,7 +383,6 @@ export class IndexerService {
             }
           }
           
-          // Strategy 2: Try manual bracket counting to find the end of the object
           this.logger.log(`Попытка восстановления JSON данных для файла ${key} (стратегия 2)`);
           let braceCount = 0;
           let inString = false;
@@ -204,11 +427,10 @@ export class IndexerService {
             }
           }
           
-          // If all repair strategies fail
           throw new Error(`Не удалось восстановить поврежденный JSON файл: ${key}`);
         } catch (repairError) {
           this.logger.error(`Все стратегии восстановления JSON не удались: ${repairError.message}`);
-          throw jsonError; // Rethrow the original error
+          throw jsonError;
         }
       }
     } catch (error) {
@@ -823,233 +1045,6 @@ export class IndexerService {
       }
       this.logger.error(`❌ Ошибка в параллельном поиске: ${error.message}`);
       throw new NotFoundException(`Ошибка при параллельном поиске телефона ${phone}`);
-    }
-  }
-
-  async findByPhoneWithProgress(
-    phone: string, 
-    progressCallback: (progress: {
-      currentDatabase: string;
-      progress: number;
-      searching: boolean;
-      found: boolean;
-      result?: any;
-      isComplete: boolean;
-      totalDatabases?: number;
-      currentDatabaseIndex?: number;
-      error?: string;
-    }) => void
-  ): Promise<void> {
-    try {
-      const databases = await this.getAllDatabases();
-      
-      if (databases.length === 0) {
-        this.logger.log(`ℹ️ Нет доступных баз данных для поиска`);
-        progressCallback({
-          currentDatabase: '',
-          progress: 100,
-          searching: false,
-          found: false,
-          isComplete: true,
-          totalDatabases: 0,
-          currentDatabaseIndex: 0,
-          error: 'Нет доступных баз данных для поиска'
-        });
-        return;
-      }
-      
-      const total = databases.length;
-      this.logger.log(`🔍 Поиск с прогрессом по телефону "${phone}" в ${total} базах данных`);
-
-      progressCallback({
-        currentDatabase: databases[0],
-        progress: 0,
-        searching: true,
-        found: false,
-        isComplete: false,
-        totalDatabases: total,
-        currentDatabaseIndex: 0
-      });
-
-      for (let i = 0; i < databases.length; i++) {
-        const databaseId = databases[i];
-        const currentProgress = Math.round((i / total) * 100);
-        this.logger.log(`🔄 Поиск в базе "${databaseId}" (${i+1}/${total}, ${currentProgress}%)`);
-
-        progressCallback({
-          currentDatabase: databaseId,
-          progress: currentProgress,
-          searching: true,
-          found: false,
-          isComplete: false,
-          totalDatabases: total,
-          currentDatabaseIndex: i
-        });
-
-        await new Promise(resolve => setTimeout(resolve, 500));
-
-        try {
-          const result = await this.findByPhone(databaseId, phone)
-            .catch(error => {
-              if (error instanceof PhoneNumberNotFoundException) {
-                return null;
-              }
-              throw error;
-            });
-            
-          if (result) {
-            this.logger.log(`✅ Запись найдена в базе "${databaseId}"`);
-            progressCallback({
-              currentDatabase: databaseId,
-              progress: 100,
-              searching: false,
-              found: true,
-              result: { database: databaseId, ...result },
-              isComplete: true,
-              totalDatabases: total,
-              currentDatabaseIndex: i + 1
-            });
-            return;
-          }
-        } catch (error) {
-          this.logger.error(`❌ Ошибка поиска в базе ${databaseId}: ${error.message}`);
-          progressCallback({
-            currentDatabase: databaseId,
-            progress: currentProgress,
-            searching: false,
-            found: false,
-            isComplete: false,
-            totalDatabases: total,
-            currentDatabaseIndex: i,
-            error: `Ошибка поиска в базе ${databaseId}: ${error.message}`
-          });
-        }
-      }
-
-      this.logger.log(`❌ Запись не найдена во всех базах данных`);
-      progressCallback({
-        currentDatabase: databases[databases.length - 1],
-        progress: 100,
-        searching: false,
-        found: false,
-        result: null,
-        isComplete: true,
-        totalDatabases: total,
-        currentDatabaseIndex: total,
-        error: `Телефон ${phone} не найден ни в одной базе данных`
-      });
-
-    } catch (error) {
-      this.logger.error(`❌ Ошибка в поиске с прогрессом: ${error.message}`);
-      progressCallback({
-        currentDatabase: '',
-        progress: 100,
-        searching: false,
-        found: false,
-        result: null,
-        isComplete: true,
-        totalDatabases: 0,
-        currentDatabaseIndex: 0,
-        error: `Ошибка поиска: ${error.message}`
-      });
-    }
-  }
-
-  async getAllDatabases(): Promise<string[]> {
-    try {
-      const folders = await this.listFolders();
-      this.logger.log(`🔍 Получение списка всех баз данных из корня бакета`);
-      this.logger.log(`✅ Найдено ${folders.length} баз данных: ${folders.join(', ')}`);
-      
-      return folders;
-    } catch (error) {
-      this.logger.error(`❌ Ошибка получения списка баз данных: ${error.message}`);
-      return [];
-    }
-  }
-
-  async getDatabaseStats(): Promise<DatabaseStatsResponse> {
-    try {
-      const databases = await this.getAllDatabases();
-      this.logger.log(`🔍 Получение статистики для ${databases.length} баз данных`);
-      
-      const stats: DatabaseStatsResponse = {
-        totalDatabases: databases.length,
-        totalRecords: 0,
-        databases: []
-      };
-
-      for (const dbId of databases) {
-        try {
-          this.logger.log(`📊 Получение статистики для базы "${dbId}"`);
-          const dbStats = await this.getSingleDatabaseStats(dbId);
-          stats.totalRecords += dbStats.totalRecords;
-          stats.databases.push({
-            id: dbId,
-            records: dbStats.totalRecords,
-            partitions: dbStats.partitions
-          });
-          this.logger.log(`✅ Статистика базы "${dbId}": ${dbStats.totalRecords} записей, ${dbStats.partitions} партиций`);
-        } catch (error) {
-          this.logger.error(`❌ Ошибка получения статистики для базы ${dbId}: ${error.message}`);
-          stats.databases.push({
-            id: dbId,
-            records: 0,
-            partitions: 0
-          });
-        }
-      }
-
-      this.logger.log(`📈 Общая статистика: ${stats.totalDatabases} баз данных, ${stats.totalRecords} записей`);
-      return stats;
-    } catch (error) {
-      this.logger.error(`❌ Ошибка получения статистики баз данных: ${error.message}`);
-      throw error;
-    }
-  }
-
-  async getSingleDatabaseStats(databaseId: string): Promise<{
-    databaseId: string;
-    totalRecords: number;
-    partitions: number;
-    prefixes: string[];
-    createdAt: Date;
-  }> {
-    try {
-      const dbFolder = `${databaseId}/`;
-      this.logger.log(`🔍 Получение статистики для базы "${databaseId}"`);
-      
-      const dbExists = await this.prefixExists(dbFolder);
-      if (!dbExists) {
-        this.logger.warn(`⚠️ Директория базы данных не существует: ${dbFolder}`);
-        throw new Error(`Директория базы данных не существует: ${dbFolder}`);
-      }
-      
-      const metadataKey = `${dbFolder}metadata.json`;
-      this.logger.log(`📖 Чтение метаданных из файла "${metadataKey}"`);
-      
-      let metadata: any = {};
-      try {
-        metadata = await this.readJsonFile(metadataKey);
-      } catch (error) {
-        this.logger.error(`❌ Ошибка чтения метаданных: ${error.message}`);
-        throw new Error(`Файл метаданных не существует или поврежден: ${metadataKey}`);
-      }
-      
-      this.logger.log(`📁 Получение списка префиксов в базе "${databaseId}"`);
-      const prefixes = await this.listFolders(dbFolder);
-      this.logger.log(`✅ Найдено ${prefixes.length} префиксов`);
-
-      return {
-        databaseId,
-        totalRecords: metadata.totalRecords || 0,
-        partitions: metadata.partitionsCount || 0,
-        prefixes,
-        createdAt: new Date(metadata.createdAt)
-      };
-    } catch (error) {
-      this.logger.error(`❌ Ошибка получения статистики для базы ${databaseId}: ${error.message}`);
-      throw error;
     }
   }
 }
