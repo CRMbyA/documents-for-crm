@@ -26,11 +26,6 @@ export class IndexerService {
   private readonly s3: S3;
   private readonly bucketName: string;
   
-  private readonly AWS_ACCESS_KEY_ID = 'AKIAX5ZI6GEMTESC256W';
-  private readonly AWS_SECRET_ACCESS_KEY = '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';
-  private readonly AWS_REGION = 'eu-west-2';
-  private readonly S3_BUCKET_NAME = 'bdb-indexing';
-  
   private indexingInProgress = false;
   private processingStats = {
     startTime: 0,
@@ -50,14 +45,14 @@ export class IndexerService {
 
   constructor() {
     this.s3 = new S3({
-      region: this.AWS_REGION,
+      region: process.env.AWS_REGION || 'eu-west-2',
       credentials: {
-        accessKeyId: this.AWS_ACCESS_KEY_ID,
-        secretAccessKey: this.AWS_SECRET_ACCESS_KEY
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ''
       }
     });
     
-    this.bucketName = this.S3_BUCKET_NAME;
+    this.bucketName = process.env.S3_BUCKET_NAME || 'bdb-indexing';
     this.logger.log(`Инициализация S3IndexerService с бакетом: ${this.bucketName}`);
   }
 
